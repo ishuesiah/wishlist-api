@@ -2,15 +2,13 @@
  * server.js
  * 
  * A minimal Express + MySQL API for a wishlist table.
- * Replace the credentials below with your own.
- * Then run: 
- *    npm install express mysql2 cors
- *    node server.js
+ * With added admin functionality.
  *******************************************************************/
 
 const express = require('express');
 const mysql = require('mysql2/promise');
 const cors = require('cors');
+const adminRoutes = require('./admin-routes'); // Import the admin routes
 
 // Create the Express app
 const app = express();
@@ -30,12 +28,20 @@ const pool = mysql.createPool({
   database: 'wishlist'
 });
 
+// Make the pool available to route handlers
+app.locals.pool = pool;
+
 /********************************************************************
  * Simple root route to confirm server is running
  ********************************************************************/
 app.get('/', (req, res) => {
   res.send('Wishlist API is up and running!');
 });
+
+/********************************************************************
+ * Admin routes - Add this for the admin interface
+ ********************************************************************/
+app.use('/admin', adminRoutes);
 
 /********************************************************************
  * POST /api/wishlist/add
@@ -131,4 +137,5 @@ app.get('/api/wishlist/:user_id', async (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Wishlist API listening on port ${PORT}`);
+  console.log(`Admin interface available at http://localhost:${PORT}/admin`);
 });
