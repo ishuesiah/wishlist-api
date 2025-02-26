@@ -47,6 +47,31 @@ const pool = mysql.createPool({
       console.log(`  ${col.Field}: ${col.Type} ${col.Null === 'YES' ? 'NULL' : 'NOT NULL'} ${col.Key}`);
     });
     
+    // Check if we need to alter the table to add new columns
+    const requiredColumns = [
+      'product_title VARCHAR(255)',
+      'product_handle VARCHAR(255)',
+      'product_image VARCHAR(512)',
+      'variant_title VARCHAR(255)',
+      'variant_image VARCHAR(512)'
+    ];
+    
+    // Convert columns to lowercase for case-insensitive comparison
+    const existingColumns = columns.map(col => col.Field.toLowerCase());
+    
+    for (const columnDef of requiredColumns) {
+      const columnName = columnDef.split(' ')[0].toLowerCase();
+      if (!existingColumns.includes(columnName)) {
+        try {
+          console.log(`Adding missing column: ${columnName}`);
+          await connection.query(`ALTER TABLE wishlist ADD COLUMN ${columnDef}`);
+          console.log(`✅ Added column ${columnName} successfully`);
+        } catch (err) {
+          console.error(`❌ Error adding column ${columnName}:`, err.message);
+        }
+      }
+    }
+    
     // Show a sample of data from wishlist table
     const [sample] = await connection.query('SELECT * FROM wishlist LIMIT 5');
     console.log('Sample wishlist data:', JSON.stringify(sample, null, 2));
@@ -69,11 +94,21 @@ app.get('/', (req, res) => {
  * POST /api/wishlist/add
  * Inserts a new wishlist item into the database.
  * Expects a JSON body with at least { "user_id": "...", "product_id": "..." }
- * Optional "variant_id".
+ * Optional fields: variant_id, product_title, product_handle, product_image, 
+ * variant_title, variant_image
  ********************************************************************/
 app.post('/api/wishlist/add', async (req, res) => {
   try {
-    const { user_id, product_id, variant_id } = req.body;
+    const { 
+      user_id, 
+      product_id, 
+      product_title, 
+      product_handle, 
+      product_image,
+      variant_id, 
+      variant_title,
+      variant_image
+    } = req.body;
     
     // Basic validation
     if (!user_id || !product_id) {
@@ -88,18 +123,51 @@ app.post('/api/wishlist/add', async (req, res) => {
     // IMPORTANT: Log the exact user_id we're using, to debug issues
     console.log('Adding wishlist item for user_id:', userIdStr, 'product_id:', productIdStr, 'variant_id:', variantIdStr || 'null');
 
-    // Insert the wishlist item
+    // Insert the wishlist item with additional product data
     const sql = `
-      INSERT INTO wishlist (user_id, product_id, variant_id)
-      VALUES (?, ?, ?)
-      ON DUPLICATE KEY UPDATE created_at = CURRENT_TIMESTAMP
+      INSERT INTO wishlist (
+        user_id, 
+        product_id, 
+        product_title, 
+        product_handle, 
+        product_image,
+        variant_id, 
+        variant_title,
+        variant_image
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON DUPLICATE KEY UPDATE 
+        created_at = CURRENT_TIMESTAMP,
+        product_title = VALUES(product_title),
+        product_handle = VALUES(product_handle),
+        product_image = VALUES(product_image),
+        variant_title = VALUES(variant_title),
+        variant_image = VALUES(variant_image)
     `;
     
     // Debug - log exact SQL with parameters
     console.log('EXECUTING SQL:', sql.replace(/\n\s+/g, ' ').trim());
-    console.log('WITH PARAMS:', [userIdStr, productIdStr, variantIdStr || null]);
+    console.log('WITH PARAMS:', [
+      userIdStr, 
+      productIdStr, 
+      product_title || null,
+      product_handle || null,
+      product_image || null,
+      variantIdStr || null,
+      variant_title || null,
+      variant_image || null
+    ]);
     
-    const [result] = await pool.execute(sql, [userIdStr, productIdStr, variantIdStr || null]);
+    const [result] = await pool.execute(sql, [
+      userIdStr, 
+      productIdStr, 
+      product_title || null,
+      product_handle || null,
+      product_image || null,
+      variantIdStr || null,
+      variant_title || null,
+      variant_image || null
+    ]);
     console.log('Insert result:', result);
 
     // Set cache-control headers
@@ -200,13 +268,17 @@ app.get('/api/wishlist/:user_id', async (req, res) => {
       console.log('DIRECT FETCH DETECTED - Using fresh connection');
       // Create a new connection to ensure no connection pooling cache
       connection = await pool.getConnection();
-      [rows] = await connection.execute('SELECT id, product_id, variant_id, created_at FROM wishlist WHERE user_id = ?', [userIdStr]);
+      [rows] = await connection.execute(
+        'SELECT id, product_id, product_title, product_handle, product_image, variant_id, variant_title, variant_image, created_at FROM wishlist WHERE user_id = ?', 
+        [userIdStr]
+      );
       console.log(`Direct fetch found ${rows.length} items for user ${userIdStr}`);
       connection.release();
     } else {
-      // Standard query
+      // Standard query - now include all new fields
       const sql = `
-        SELECT id, product_id, variant_id, created_at
+        SELECT id, product_id, product_title, product_handle, product_image, 
+               variant_id, variant_title, variant_image, created_at
         FROM wishlist
         WHERE user_id = ?
         ORDER BY created_at DESC
@@ -333,7 +405,7 @@ app.get('/api/admin/force-wishlist/:actual_user_id', async (req, res) => {
     
     console.log('FORCE ENDPOINT: Fetching wishlist for user_id:', userIdStr);
 
-    // Direct database query with minimal processing
+    // Direct database query with minimal processing - include all columns
     const connection = await pool.getConnection();
     const [rows] = await connection.execute('SELECT * FROM wishlist WHERE user_id = ?', [userIdStr]);
     connection.release();
