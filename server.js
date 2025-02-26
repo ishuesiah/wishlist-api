@@ -1,13 +1,3 @@
-/*******************************************************************
- * server.js
- * 
- * A minimal Express + MySQL API for a wishlist table.
- * Replace the credentials below with your own.
- * Then run: 
- *    npm install express mysql2 cors
- *    node server.js
- *******************************************************************/
-
 const express = require('express');
 const mysql = require('mysql2/promise');
 const cors = require('cors');
@@ -47,31 +37,6 @@ const pool = mysql.createPool({
       console.log(`  ${col.Field}: ${col.Type} ${col.Null === 'YES' ? 'NULL' : 'NOT NULL'} ${col.Key}`);
     });
     
-    // Check if we need to alter the table to add new columns
-    const requiredColumns = [
-      'product_title VARCHAR(255)',
-      'product_handle VARCHAR(255)',
-      'product_image VARCHAR(512)',
-      'variant_title VARCHAR(255)',
-      'variant_image VARCHAR(512)'
-    ];
-    
-    // Convert columns to lowercase for case-insensitive comparison
-    const existingColumns = columns.map(col => col.Field.toLowerCase());
-    
-    for (const columnDef of requiredColumns) {
-      const columnName = columnDef.split(' ')[0].toLowerCase();
-      if (!existingColumns.includes(columnName)) {
-        try {
-          console.log(`Adding missing column: ${columnName}`);
-          await connection.query(`ALTER TABLE wishlist ADD COLUMN ${columnDef}`);
-          console.log(`✅ Added column ${columnName} successfully`);
-        } catch (err) {
-          console.error(`❌ Error adding column ${columnName}:`, err.message);
-        }
-      }
-    }
-    
     // Show a sample of data from wishlist table
     const [sample] = await connection.query('SELECT * FROM wishlist LIMIT 5');
     console.log('Sample wishlist data:', JSON.stringify(sample, null, 2));
@@ -99,6 +64,9 @@ app.get('/', (req, res) => {
  ********************************************************************/
 app.post('/api/wishlist/add', async (req, res) => {
   try {
+    console.log('=== ADD WISHLIST ITEM ===');
+    console.log('Received request body:', req.body);
+    
     const { 
       user_id, 
       product_id, 
@@ -109,6 +77,17 @@ app.post('/api/wishlist/add', async (req, res) => {
       variant_title,
       variant_image
     } = req.body;
+    
+    // Log each field separately for debugging
+    console.log('Extracted fields:');
+    console.log('- user_id:', user_id, typeof user_id);
+    console.log('- product_id:', product_id, typeof product_id);
+    console.log('- product_title:', product_title, typeof product_title);
+    console.log('- product_handle:', product_handle, typeof product_handle);
+    console.log('- product_image:', product_image, typeof product_image);
+    console.log('- variant_id:', variant_id, typeof variant_id);
+    console.log('- variant_title:', variant_title, typeof variant_title);
+    console.log('- variant_image:', variant_image, typeof variant_image);
     
     // Basic validation
     if (!user_id || !product_id) {
@@ -145,30 +124,36 @@ app.post('/api/wishlist/add', async (req, res) => {
         variant_image = VALUES(variant_image)
     `;
     
+    // Create the parameters array
+    const params = [
+      userIdStr, 
+      productIdStr, 
+      product_title || null,
+      product_handle || null,
+      product_image || null,
+      variantIdStr || null,
+      variant_title || null,
+      variant_image || null
+    ];
+    
     // Debug - log exact SQL with parameters
     console.log('EXECUTING SQL:', sql.replace(/\n\s+/g, ' ').trim());
-    console.log('WITH PARAMS:', [
-      userIdStr, 
-      productIdStr, 
-      product_title || null,
-      product_handle || null,
-      product_image || null,
-      variantIdStr || null,
-      variant_title || null,
-      variant_image || null
-    ]);
+    console.log('WITH PARAMS:', params);
     
-    const [result] = await pool.execute(sql, [
-      userIdStr, 
-      productIdStr, 
-      product_title || null,
-      product_handle || null,
-      product_image || null,
-      variantIdStr || null,
-      variant_title || null,
-      variant_image || null
-    ]);
-    console.log('Insert result:', result);
+    try {
+      const [result] = await pool.execute(sql, params);
+      console.log('Insert result:', result);
+    } catch (dbError) {
+      console.error('Database error during insert:', dbError);
+      
+      // Try to get more detailed information about the error
+      console.log('Attempting to debug values:');
+      for (let i = 0; i < params.length; i++) {
+        console.log(`Param ${i}:`, params[i], typeof params[i], params[i] === null ? 'is null' : 'not null');
+      }
+      
+      throw dbError;
+    }
 
     // Set cache-control headers
     res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
@@ -178,7 +163,7 @@ app.post('/api/wishlist/add', async (req, res) => {
     return res.json({ success: true });
   } catch (error) {
     console.error('Error adding wishlist item:', error);
-    return res.status(500).json({ error: 'Server error' });
+    return res.status(500).json({ error: 'Server error: ' + error.message });
   }
 });
 
@@ -190,6 +175,9 @@ app.post('/api/wishlist/add', async (req, res) => {
  ********************************************************************/
 app.post('/api/wishlist/remove', async (req, res) => {
   try {
+    console.log('=== REMOVE WISHLIST ITEM ===');
+    console.log('Received request body:', req.body);
+    
     const { user_id, product_id, variant_id } = req.body;
 
     // Convert user_id, product_id and variant_id to strings to ensure consistent handling
@@ -232,7 +220,7 @@ app.post('/api/wishlist/remove', async (req, res) => {
     return res.json({ success: true });
   } catch (error) {
     console.error('Error removing wishlist item:', error);
-    return res.status(500).json({ error: 'Server error' });
+    return res.status(500).json({ error: 'Server error: ' + error.message });
   }
 });
 
@@ -264,30 +252,29 @@ app.get('/api/wishlist/:user_id', async (req, res) => {
     let connection;
     let rows;
     
+    // Query for all columns in wishlist table
+    const sqlQuery = `
+      SELECT id, user_id, product_id, variant_id, 
+             product_title, product_handle, product_image,
+             variant_title, variant_image, created_at
+      FROM wishlist
+      WHERE user_id = ?
+      ORDER BY created_at DESC
+    `;
+    
     if (isDirectFetch) {
       console.log('DIRECT FETCH DETECTED - Using fresh connection');
       // Create a new connection to ensure no connection pooling cache
       connection = await pool.getConnection();
-      [rows] = await connection.execute(
-        'SELECT id, product_id, product_title, product_handle, product_image, variant_id, variant_title, variant_image, created_at FROM wishlist WHERE user_id = ?', 
-        [userIdStr]
-      );
+      [rows] = await connection.execute(sqlQuery, [userIdStr]);
       console.log(`Direct fetch found ${rows.length} items for user ${userIdStr}`);
       connection.release();
     } else {
       // Standard query - now include all new fields
-      const sql = `
-        SELECT id, product_id, product_title, product_handle, product_image, 
-               variant_id, variant_title, variant_image, created_at
-        FROM wishlist
-        WHERE user_id = ?
-        ORDER BY created_at DESC
-      `;
-      
-      console.log('EXECUTING SQL:', sql.replace(/\n\s+/g, ' ').trim());
+      console.log('EXECUTING SQL:', sqlQuery.replace(/\n\s+/g, ' ').trim());
       console.log('WITH PARAMS:', [userIdStr]);
       
-      [rows] = await pool.execute(sql, [userIdStr]);
+      [rows] = await pool.execute(sqlQuery, [userIdStr]);
       console.log(`Found ${rows.length} wishlist items for user ${userIdStr}`);
     }
     
@@ -302,7 +289,7 @@ app.get('/api/wishlist/:user_id', async (req, res) => {
     return res.json({ wishlist: rows });
   } catch (error) {
     console.error('Error fetching wishlist items:', error);
-    return res.status(500).json({ error: 'Server error' });
+    return res.status(500).json({ error: 'Server error: ' + error.message });
   }
 });
 
@@ -332,7 +319,7 @@ app.get('/api/debug/wishlist-user/:user_id', async (req, res) => {
     });
   } catch (error) {
     console.error('Error in debug endpoint:', error);
-    return res.status(500).json({ error: 'Server error' });
+    return res.status(500).json({ error: 'Server error: ' + error.message });
   }
 });
 
@@ -379,7 +366,7 @@ app.get('/api/admin/check-database', async (req, res) => {
     
   } catch (error) {
     console.error('Database check error:', error);
-    return res.status(500).json({ error: 'Database check failed' });
+    return res.status(500).json({ error: 'Database check failed: ' + error.message });
   }
 });
 
@@ -427,7 +414,7 @@ app.get('/api/admin/force-wishlist/:actual_user_id', async (req, res) => {
     });
   } catch (error) {
     console.error('Error in force wishlist endpoint:', error);
-    return res.status(500).json({ error: 'Server error' });
+    return res.status(500).json({ error: 'Server error: ' + error.message });
   }
 });
 
