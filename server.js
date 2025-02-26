@@ -5,8 +5,8 @@ const cors = require('cors');
 // Create the Express app
 const app = express();
 
-// Allow JSON bodies in requests
-app.use(express.json());
+// Increase the JSON payload size limit (if large images are being sent)
+app.use(express.json({ limit: '2mb' }));
 
 // Allow cross-origin requests (e.g., from your Shopify store domain)
 app.use(cors());
@@ -67,16 +67,15 @@ app.post('/api/wishlist/add', async (req, res) => {
     console.log('=== ADD WISHLIST ITEM ===');
     console.log('Received request body:', req.body);
     
-    const { 
-      user_id, 
-      product_id, 
-      product_title, 
-      product_handle, 
-      product_image,
-      variant_id, 
-      variant_title,
-      variant_image
-    } = req.body;
+    // Extract all possible fields, using defaults for optional ones
+    const user_id = req.body.user_id || null;
+    const product_id = req.body.product_id || null;
+    const product_title = req.body.product_title || null;
+    const product_handle = req.body.product_handle || null;
+    const product_image = req.body.product_image || null;
+    const variant_id = req.body.variant_id || null;
+    const variant_title = req.body.variant_title || null;
+    const variant_image = req.body.variant_image || null;
     
     // Log each field separately for debugging
     console.log('Extracted fields:');
@@ -97,6 +96,7 @@ app.post('/api/wishlist/add', async (req, res) => {
     // Convert user_id, product_id and variant_id to strings to ensure consistent handling
     const userIdStr = String(user_id);
     const productIdStr = String(product_id);
+    // Ensure variant_id is either a string or empty string (not null)
     const variantIdStr = variant_id ? String(variant_id) : '';
 
     // IMPORTANT: Log the exact user_id we're using, to debug issues
@@ -128,12 +128,12 @@ app.post('/api/wishlist/add', async (req, res) => {
     const params = [
       userIdStr, 
       productIdStr, 
-      product_title || null,
-      product_handle || null,
-      product_image || null,
-      variantIdStr || null,
-      variant_title || null,
-      variant_image || null
+      product_title, 
+      product_handle, 
+      product_image,
+      variantIdStr || '',  // Ensure empty string instead of null
+      variant_title, 
+      variant_image
     ];
     
     // Debug - log exact SQL with parameters
@@ -371,54 +371,6 @@ app.get('/api/admin/check-database', async (req, res) => {
 });
 
 /********************************************************************
- * Force direct wishlist endpoint to bypass any caching
- ********************************************************************/
-app.get('/api/admin/force-wishlist/:actual_user_id', async (req, res) => {
-  try {
-    const { actual_user_id } = req.params;
-    const secretKey = req.query.key || '';
-    
-    // Simple security check - require a secret key
-    if (secretKey !== 'custom-secret-12345') {
-      return res.status(403).json({ error: 'Not authorized' });
-    }
-    
-    if (!actual_user_id) {
-      return res.status(400).json({ error: 'Missing user_id parameter' });
-    }
-
-    // Convert user_id to string to ensure consistent handling
-    const userIdStr = String(actual_user_id);
-    
-    console.log('FORCE ENDPOINT: Fetching wishlist for user_id:', userIdStr);
-
-    // Direct database query with minimal processing - include all columns
-    const connection = await pool.getConnection();
-    const [rows] = await connection.execute('SELECT * FROM wishlist WHERE user_id = ?', [userIdStr]);
-    connection.release();
-    
-    console.log(`FORCE ENDPOINT: Found ${rows.length} wishlist items`);
-    
-    // Set cache-control headers
-    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-    res.setHeader('Pragma', 'no-cache');
-    res.setHeader('Expires', '0');
-
-    return res.json({ 
-      wishlist: rows,
-      diagnostic: {
-        user_id_provided: userIdStr,
-        query_time: new Date().toISOString(),
-        row_count: rows.length
-      }
-    });
-  } catch (error) {
-    console.error('Error in force wishlist endpoint:', error);
-    return res.status(500).json({ error: 'Server error: ' + error.message });
-  }
-});
-
-/********************************************************************
  * Start the server
  ********************************************************************/
 const PORT = process.env.PORT || 3000;
@@ -426,6 +378,5 @@ app.listen(PORT, () => {
   console.log(`Wishlist API listening on port ${PORT}`);
   console.log(`Server started at: ${new Date().toISOString()}`);
   console.log(`Debug endpoint available at: http://localhost:${PORT}/api/debug/wishlist-user/YOUR_USER_ID`);
-  console.log(`Force direct wishlist endpoint: http://localhost:${PORT}/api/admin/force-wishlist/YOUR_USER_ID?key=custom-secret-12345`);
   console.log(`Database check endpoint: http://localhost:${PORT}/api/admin/check-database?key=wishlist-check-123`);
 });
