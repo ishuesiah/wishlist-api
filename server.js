@@ -8,7 +8,12 @@
 const express = require('express');
 const mysql = require('mysql2/promise');
 const cors = require('cors');
-const adminRoutes = require('./admin-routes'); // Import the admin routes
+const dotenv = require('dotenv'); // For environment variables
+const adminRoutes = require('./admin-routes');
+const path = require('path');
+
+// Load environment variables
+dotenv.config();
 
 // Create the Express app
 const app = express();
@@ -16,15 +21,28 @@ const app = express();
 // Allow JSON bodies in requests
 app.use(express.json());
 
-// Allow cross-origin requests (e.g., from your Shopify store domain)
+// Allow cross-origin requests (restrict to your Shopify store domain in production)
+const allowedOrigins = process.env.ALLOWED_ORIGINS ? 
+  process.env.ALLOWED_ORIGINS.split(',') : 
+  ['http://localhost:3000', 'https://yourshopifystore.myshopify.com']; // Add your actual Shopify store domain
+
 app.use(cors({
-  origin: '*', // Allow all origins (consider restricting this in production)
+  origin: function(origin, callback) {
+    // Allow requests with no origin (mobile apps, curl, etc)
+    if (!origin) return callback(null, true);
+    // Check allowed origins
+    if (allowedOrigins.indexOf(origin) === -1) {
+      const msg = 'The CORS policy for this site does not allow access from the specified origin.';
+      return callback(new Error(msg), false);
+    }
+    return callback(null, true);
+  },
   methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true
 }));
 
-// Enable more detailed error logging
+// Enable detailed request logging
 app.use((req, res, next) => {
   const start = Date.now();
   res.on('finish', () => {
@@ -34,32 +52,49 @@ app.use((req, res, next) => {
   next();
 });
 
-// Set up the database connection pool using your Kinsta credentials
-const pool = mysql.createPool({
-  host: 'northamerica-northeast1-001.proxy.kinsta.app',
-  port: 30904,
-  user: 'hemlockandoak',
-  password: 'wV0]pW3I*',
-  database: 'wishlist',
+// Get database credentials from environment variables or use defaults for development
+const dbConfig = {
+  host: process.env.DB_HOST || 'northamerica-northeast1-001.proxy.kinsta.app',
+  port: parseInt(process.env.DB_PORT || '30904'),
+  user: process.env.DB_USER || 'hemlockandoak',
+  password: process.env.DB_PASSWORD || 'wV0]pW3I*',
+  database: process.env.DB_NAME || 'wishlist',
   waitForConnections: true,
-  connectionLimit: 10,
+  connectionLimit: parseInt(process.env.DB_CONNECTION_LIMIT || '10'),
   queueLimit: 0,
-  connectTimeout: 10000,
+  connectTimeout: parseInt(process.env.DB_CONNECT_TIMEOUT || '20000'), // Increased timeout to 20s
   enableKeepAlive: true,
   keepAliveInitialDelay: 0
-});
+};
+
+// Set up the database connection pool
+const pool = mysql.createPool(dbConfig);
 
 // Make the pool available to route handlers
 app.locals.pool = pool;
 
-// Test database connection on startup
+// Test database connection on startup with retry logic
 (async () => {
-  try {
-    const connection = await pool.getConnection();
-    console.log('Successfully connected to the database');
-    connection.release();
-  } catch (err) {
-    console.error('Database connection failed:', err);
+  let connected = false;
+  const maxRetries = 5;
+  let retries = 0;
+  
+  while (!connected && retries < maxRetries) {
+    try {
+      const connection = await pool.getConnection();
+      console.log('Successfully connected to the database');
+      connection.release();
+      connected = true;
+    } catch (err) {
+      retries++;
+      console.error(`Database connection attempt ${retries} failed:`, err);
+      // Wait before retrying (exponential backoff)
+      await new Promise(resolve => setTimeout(resolve, 1000 * Math.pow(2, retries)));
+    }
+  }
+  
+  if (!connected) {
+    console.error(`Failed to connect to database after ${maxRetries} attempts`);
     process.exit(1);
   }
 })();
@@ -97,30 +132,54 @@ app.post('/api/wishlist/add', async (req, res) => {
     // Always use empty string instead of null for variant_id to match database schema
     const variantValue = variant_id || '';
 
-    // Check if this item already exists to avoid duplicates
-    const checkSql = `
-      SELECT id FROM wishlist 
-      WHERE user_id = ? AND product_id = ? AND variant_id = ?
-    `;
-    const [existing] = await pool.execute(checkSql, [user_id, product_id, variantValue]);
+    // Begin transaction to ensure database consistency
+    const connection = await pool.getConnection();
+    await connection.beginTransaction();
 
-    if (existing && existing.length > 0) {
-      console.log('Item already exists in wishlist');
-      return res.json({ success: true, message: 'Item already in wishlist' });
+    try {
+      // Check if this item already exists to avoid duplicates
+      const checkSql = `
+        SELECT id FROM wishlist 
+        WHERE user_id = ? AND product_id = ? AND variant_id = ?
+      `;
+      const [existing] = await connection.execute(checkSql, [user_id, product_id, variantValue]);
+
+      if (existing && existing.length > 0) {
+        console.log('Item already exists in wishlist');
+        await connection.commit();
+        connection.release();
+        return res.json({ success: true, message: 'Item already in wishlist' });
+      }
+
+      // Insert the wishlist item
+      const sql = `
+        INSERT INTO wishlist (user_id, product_id, variant_id)
+        VALUES (?, ?, ?)
+      `;
+      const [result] = await connection.execute(sql, [user_id, product_id, variantValue]);
+      console.log('Item added to wishlist, ID:', result.insertId);
+
+      await connection.commit();
+      connection.release();
+      
+      return res.json({ 
+        success: true, 
+        message: 'Item added to wishlist', 
+        id: result.insertId 
+      });
+    } catch (error) {
+      // Rollback transaction on error
+      await connection.rollback();
+      connection.release();
+      throw error;  // Re-throw to be caught by the outer catch block
     }
-
-    // Insert the wishlist item
-    const sql = `
-      INSERT INTO wishlist (user_id, product_id, variant_id)
-      VALUES (?, ?, ?)
-    `;
-    const [result] = await pool.execute(sql, [user_id, product_id, variantValue]);
-    console.log('Item added to wishlist, ID:', result.insertId);
-
-    return res.json({ success: true });
   } catch (error) {
     console.error('Error adding wishlist item:', error);
-    return res.status(500).json({ success: false, error: 'Server error', details: error.message });
+    return res.status(500).json({ 
+      success: false, 
+      error: 'Server error', 
+      details: error.message 
+    });
   }
 });
 
@@ -151,10 +210,18 @@ app.post('/api/wishlist/remove', async (req, res) => {
     const [result] = await pool.execute(sql, params);
     console.log('Items removed from wishlist:', result.affectedRows);
 
-    return res.json({ success: true });
+    return res.json({ 
+      success: true, 
+      message: 'Item removed from wishlist',
+      affectedRows: result.affectedRows 
+    });
   } catch (error) {
     console.error('Error removing wishlist item:', error);
-    return res.status(500).json({ success: false, error: 'Server error', details: error.message });
+    return res.status(500).json({ 
+      success: false, 
+      error: 'Server error', 
+      details: error.message 
+    });
   }
 });
 
@@ -194,10 +261,54 @@ app.get('/api/wishlist/:user_id', async (req, res) => {
       console.log('First item:', JSON.stringify(rows[0]));
     }
 
-    return res.json({ success: true, wishlist: rows });
+    return res.json({ 
+      success: true, 
+      wishlist: rows 
+    });
   } catch (error) {
     console.error('Error fetching wishlist items:', error);
-    return res.status(500).json({ success: false, error: 'Server error', details: error.message });
+    return res.status(500).json({ 
+      success: false, 
+      error: 'Server error', 
+      details: error.message 
+    });
+  }
+});
+
+/********************************************************************
+ * POST /api/wishlist/check
+ * Checks if a specific product is in a user's wishlist
+ * Expects a JSON body with { "user_id": "...", "product_id": "..." }
+ ********************************************************************/
+app.post('/api/wishlist/check', async (req, res) => {
+  try {
+    const { user_id, product_id, variant_id } = req.body;
+    
+    if (!user_id || !product_id) {
+      return res.status(400).json({ success: false, error: 'Missing user_id or product_id' });
+    }
+
+    // Always use empty string instead of null for variant_id to match database schema
+    const variantValue = variant_id || '';
+
+    const sql = `
+      SELECT id FROM wishlist 
+      WHERE user_id = ? AND product_id = ? AND variant_id = ?
+    `;
+    
+    const [rows] = await pool.execute(sql, [user_id, product_id, variantValue]);
+    
+    return res.json({ 
+      success: true, 
+      inWishlist: rows.length > 0 
+    });
+  } catch (error) {
+    console.error('Error checking wishlist item:', error);
+    return res.status(500).json({ 
+      success: false, 
+      error: 'Server error', 
+      details: error.message 
+    });
   }
 });
 
@@ -213,11 +324,38 @@ app.get('/api/debug/pool', (req, res) => {
       host: pool.config.host,
       port: pool.config.port,
       database: pool.config.database,
-      user: pool.config.user
+      user: pool.config.user,
+      // Never expose password
     }
   };
   
   res.json(poolStats);
+});
+
+/********************************************************************
+ * Health check endpoint
+ ********************************************************************/
+app.get('/health', async (req, res) => {
+  try {
+    // Test database connection
+    const connection = await pool.getConnection();
+    await connection.execute('SELECT 1');
+    connection.release();
+    
+    res.json({ 
+      status: 'ok', 
+      database: 'connected', 
+      timestamp: new Date().toISOString() 
+    });
+  } catch (error) {
+    console.error('Health check failed:', error);
+    res.status(500).json({ 
+      status: 'error', 
+      database: 'disconnected', 
+      error: error.message, 
+      timestamp: new Date().toISOString() 
+    });
+  }
 });
 
 /********************************************************************
