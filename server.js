@@ -52,8 +52,8 @@ app.post('/api/wishlist/add', async (req, res) => {
       return res.status(400).json({ error: 'Missing user_id or product_id' });
     }
 
-    // Log the received data
-    console.log('Add request received:', { user_id, product_id, variant_id });
+    // IMPORTANT: Log the exact user_id we're using, to debug issues
+    console.log('Adding wishlist item for user_id:', user_id, 'product_id:', product_id, 'variant_id:', variant_id || 'null');
 
     // Insert the wishlist item
     const sql = `
@@ -61,7 +61,9 @@ app.post('/api/wishlist/add', async (req, res) => {
       VALUES (?, ?, ?)
       ON DUPLICATE KEY UPDATE created_at = CURRENT_TIMESTAMP
     `;
-    await pool.execute(sql, [user_id, product_id, variant_id || null]);
+    
+    const [result] = await pool.execute(sql, [user_id, product_id, variant_id || null]);
+    console.log('Insert result:', result);
 
     return res.json({ success: true });
   } catch (error) {
@@ -80,8 +82,8 @@ app.post('/api/wishlist/remove', async (req, res) => {
   try {
     const { user_id, product_id, variant_id } = req.body;
 
-    // Log the received data
-    console.log('Remove request received:', { user_id, product_id, variant_id });
+    // IMPORTANT: Log the exact user_id we're using, to debug issues
+    console.log('Removing wishlist item for user_id:', user_id, 'product_id:', product_id, 'variant_id:', variant_id || 'null');
 
     if (!user_id || !product_id) {
       return res.status(400).json({ error: 'Missing user_id or product_id' });
@@ -97,6 +99,7 @@ app.post('/api/wishlist/remove', async (req, res) => {
     }
 
     const [result] = await pool.execute(sql, params);
+    console.log('Delete result:', result);
     
     if (result.affectedRows === 0) {
       console.log('No rows affected, item may not exist');
@@ -121,8 +124,8 @@ app.get('/api/wishlist/:user_id', async (req, res) => {
       return res.status(400).json({ error: 'Missing user_id parameter' });
     }
 
-    // Log the request
-    console.log('Fetch wishlist request for user:', user_id);
+    // IMPORTANT: Log the exact user_id we're querying, to debug issues
+    console.log('Fetching wishlist for user_id:', user_id);
 
     const sql = `
       SELECT id, product_id, variant_id, created_at
@@ -130,14 +133,35 @@ app.get('/api/wishlist/:user_id', async (req, res) => {
       WHERE user_id = ?
       ORDER BY created_at DESC
     `;
+    
     const [rows] = await pool.execute(sql, [user_id]);
-
-    // Log the results
     console.log(`Found ${rows.length} wishlist items for user ${user_id}`);
     
+    // Log the actual rows for debugging
+    if (rows.length > 0) {
+      console.log('First few items:', rows.slice(0, 3));
+    }
+
     return res.json({ wishlist: rows });
   } catch (error) {
     console.error('Error fetching wishlist items:', error);
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
+/********************************************************************
+ * Special debug endpoint to verify user_id handling
+ ********************************************************************/
+app.get('/api/debug/wishlist-user/:user_id', async (req, res) => {
+  try {
+    const { user_id } = req.params;
+    console.log('Debug endpoint called with user_id:', user_id);
+    return res.json({ 
+      received_user_id: user_id,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('Error in debug endpoint:', error);
     return res.status(500).json({ error: 'Server error' });
   }
 });
