@@ -30,6 +30,34 @@ const pool = mysql.createPool({
   database: 'wishlist'
 });
 
+// For debug: test the database connection immediately
+(async function testConnection() {
+  try {
+    const connection = await pool.getConnection();
+    console.log('✅ Successfully connected to database!');
+    
+    // Show all tables for debug
+    const [tables] = await connection.query('SHOW TABLES');
+    console.log('Available tables:', tables.map(t => Object.values(t)[0]));
+    
+    // Show schema of wishlist table
+    const [columns] = await connection.query('DESCRIBE wishlist');
+    console.log('Wishlist table structure:');
+    columns.forEach(col => {
+      console.log(`  ${col.Field}: ${col.Type} ${col.Null === 'YES' ? 'NULL' : 'NOT NULL'} ${col.Key}`);
+    });
+    
+    // Show a sample of data from wishlist table
+    const [sample] = await connection.query('SELECT * FROM wishlist LIMIT 5');
+    console.log('Sample wishlist data:', JSON.stringify(sample, null, 2));
+    
+    connection.release();
+  } catch (err) {
+    console.error('❌ Database connection error:', err);
+    process.exit(1);
+  }
+})();
+
 /********************************************************************
  * Simple root route to confirm server is running
  ********************************************************************/
@@ -61,6 +89,10 @@ app.post('/api/wishlist/add', async (req, res) => {
       VALUES (?, ?, ?)
       ON DUPLICATE KEY UPDATE created_at = CURRENT_TIMESTAMP
     `;
+    
+    // Debug - log exact SQL with parameters
+    console.log('EXECUTING SQL:', sql.replace(/\n\s+/g, ' ').trim());
+    console.log('WITH PARAMS:', [user_id, product_id, variant_id || null]);
     
     const [result] = await pool.execute(sql, [user_id, product_id, variant_id || null]);
     console.log('Insert result:', result);
@@ -98,6 +130,10 @@ app.post('/api/wishlist/remove', async (req, res) => {
       params.push(variant_id);
     }
 
+    // Debug - log exact SQL with parameters
+    console.log('EXECUTING SQL:', sql);
+    console.log('WITH PARAMS:', params);
+    
     const [result] = await pool.execute(sql, params);
     console.log('Delete result:', result);
     
@@ -125,7 +161,11 @@ app.get('/api/wishlist/:user_id', async (req, res) => {
     }
 
     // IMPORTANT: Log the exact user_id we're querying, to debug issues
-    console.log('Fetching wishlist for user_id:', user_id);
+    console.log('==========================================');
+    console.log('WISHLIST REQUEST RECEIVED');
+    console.log('Fetching wishlist for user_id:', user_id, 'Type:', typeof user_id);
+    console.log('Request params:', req.params);
+    console.log('==========================================');
 
     const sql = `
       SELECT id, product_id, variant_id, created_at
@@ -134,13 +174,33 @@ app.get('/api/wishlist/:user_id', async (req, res) => {
       ORDER BY created_at DESC
     `;
     
+    // Debug - log exact SQL with parameters
+    console.log('EXECUTING SQL:', sql.replace(/\n\s+/g, ' ').trim());
+    console.log('WITH PARAMS:', [user_id]);
+    
+    // For debugging - try with both string and numeric user_id
+    console.log('TESTING DIRECT QUERY WITH STRING USER_ID...');
+    const [testRows1] = await pool.execute('SELECT * FROM wishlist WHERE user_id = ?', [String(user_id)]);
+    console.log(`Found ${testRows1.length} wishlist items with String(user_id)`);
+    
+    console.log('TESTING DIRECT QUERY WITH NUMERIC USER_ID...');
+    const [testRows2] = await pool.execute('SELECT * FROM wishlist WHERE user_id = ?', [Number(user_id)]);
+    console.log(`Found ${testRows2.length} wishlist items with Number(user_id)`);
+    
+    // Regular query
     const [rows] = await pool.execute(sql, [user_id]);
     console.log(`Found ${rows.length} wishlist items for user ${user_id}`);
     
-    // Log the actual rows for debugging
-    if (rows.length > 0) {
-      console.log('First few items:', rows.slice(0, 3));
-    }
+    // Debug ALL rows for the user_id
+    console.log('ALL WISHLIST ITEMS:', JSON.stringify(rows, null, 2));
+    
+    // Query all items regardless of user_id (limited for safety)
+    const [allRows] = await pool.query('SELECT * FROM wishlist LIMIT 20');
+    console.log('SAMPLE OF ALL DB ITEMS:', allRows.map(r => ({
+      id: r.id,
+      user_id: r.user_id,
+      product_id: r.product_id
+    })));
 
     return res.json({ wishlist: rows });
   } catch (error) {
@@ -155,14 +215,69 @@ app.get('/api/wishlist/:user_id', async (req, res) => {
 app.get('/api/debug/wishlist-user/:user_id', async (req, res) => {
   try {
     const { user_id } = req.params;
-    console.log('Debug endpoint called with user_id:', user_id);
+    console.log('Debug endpoint called with user_id:', user_id, 'Type:', typeof user_id);
+    
+    // Try to query with this user_id
+    const [rows] = await pool.execute('SELECT COUNT(*) AS count FROM wishlist WHERE user_id = ?', [user_id]);
+    
     return res.json({ 
       received_user_id: user_id,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
+      item_count: rows[0].count
     });
   } catch (error) {
     console.error('Error in debug endpoint:', error);
     return res.status(500).json({ error: 'Server error' });
+  }
+});
+
+/********************************************************************
+ * Direct DB query endpoint - test with various user IDs
+ ********************************************************************/
+app.get('/api/dbtest/:test_user_id', async (req, res) => {
+  try {
+    const { test_user_id } = req.params;
+    console.log('Testing DB with user_id:', test_user_id);
+    
+    const connection = await pool.getConnection();
+    
+    // Try string and number formats
+    const results = {
+      as_string: {},
+      as_number: {}
+    };
+    
+    // Test with string
+    const [stringResults] = await connection.execute(
+      'SELECT * FROM wishlist WHERE user_id = ?', 
+      [String(test_user_id)]
+    );
+    results.as_string.count = stringResults.length;
+    results.as_string.items = stringResults.map(item => ({
+      id: item.id,
+      product_id: item.product_id
+    }));
+    
+    // Test with number
+    const [numberResults] = await connection.execute(
+      'SELECT * FROM wishlist WHERE user_id = ?', 
+      [Number(test_user_id)]
+    );
+    results.as_number.count = numberResults.length;
+    results.as_number.items = numberResults.map(item => ({
+      id: item.id,
+      product_id: item.product_id
+    }));
+    
+    connection.release();
+    
+    res.json({
+      test_user_id,
+      results
+    });
+  } catch (error) {
+    console.error('Error in DB test endpoint:', error);
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
@@ -172,4 +287,7 @@ app.get('/api/debug/wishlist-user/:user_id', async (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Wishlist API listening on port ${PORT}`);
+  console.log(`Server started at: ${new Date().toISOString()}`);
+  console.log(`Debug endpoint available at: http://localhost:${PORT}/api/debug/wishlist-user/YOUR_USER_ID`); 
+  console.log(`DB test endpoint available at: http://localhost:${PORT}/api/dbtest/YOUR_USER_ID`);
 });
