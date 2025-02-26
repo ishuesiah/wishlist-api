@@ -80,8 +80,13 @@ app.post('/api/wishlist/add', async (req, res) => {
       return res.status(400).json({ error: 'Missing user_id or product_id' });
     }
 
+    // Convert user_id, product_id and variant_id to strings to ensure consistent handling
+    const userIdStr = String(user_id);
+    const productIdStr = String(product_id);
+    const variantIdStr = variant_id ? String(variant_id) : '';
+
     // IMPORTANT: Log the exact user_id we're using, to debug issues
-    console.log('Adding wishlist item for user_id:', user_id, 'product_id:', product_id, 'variant_id:', variant_id || 'null');
+    console.log('Adding wishlist item for user_id:', userIdStr, 'product_id:', productIdStr, 'variant_id:', variantIdStr || 'null');
 
     // Insert the wishlist item
     const sql = `
@@ -92,9 +97,9 @@ app.post('/api/wishlist/add', async (req, res) => {
     
     // Debug - log exact SQL with parameters
     console.log('EXECUTING SQL:', sql.replace(/\n\s+/g, ' ').trim());
-    console.log('WITH PARAMS:', [user_id, product_id, variant_id || null]);
+    console.log('WITH PARAMS:', [userIdStr, productIdStr, variantIdStr || null]);
     
-    const [result] = await pool.execute(sql, [user_id, product_id, variant_id || null]);
+    const [result] = await pool.execute(sql, [userIdStr, productIdStr, variantIdStr || null]);
     console.log('Insert result:', result);
 
     return res.json({ success: true });
@@ -114,20 +119,25 @@ app.post('/api/wishlist/remove', async (req, res) => {
   try {
     const { user_id, product_id, variant_id } = req.body;
 
-    // IMPORTANT: Log the exact user_id we're using, to debug issues
-    console.log('Removing wishlist item for user_id:', user_id, 'product_id:', product_id, 'variant_id:', variant_id || 'null');
+    // Convert user_id, product_id and variant_id to strings to ensure consistent handling
+    const userIdStr = String(user_id);
+    const productIdStr = String(product_id);
+    const variantIdStr = variant_id ? String(variant_id) : '';
 
-    if (!user_id || !product_id) {
+    // IMPORTANT: Log the exact user_id we're using, to debug issues
+    console.log('Removing wishlist item for user_id:', userIdStr, 'product_id:', productIdStr, 'variant_id:', variantIdStr || 'null');
+
+    if (!userIdStr || !productIdStr) {
       return res.status(400).json({ error: 'Missing user_id or product_id' });
     }
 
     // Build a query that optionally checks variant_id if it's provided
     let sql = 'DELETE FROM wishlist WHERE user_id = ? AND product_id = ?';
-    const params = [user_id, product_id];
+    const params = [userIdStr, productIdStr];
 
-    if (variant_id) {
+    if (variantIdStr) {
       sql += ' AND variant_id = ?';
-      params.push(variant_id);
+      params.push(variantIdStr);
     }
 
     // Debug - log exact SQL with parameters
@@ -160,10 +170,13 @@ app.get('/api/wishlist/:user_id', async (req, res) => {
       return res.status(400).json({ error: 'Missing user_id parameter' });
     }
 
+    // Convert user_id to string to ensure consistent handling
+    const userIdStr = String(user_id);
+
     // IMPORTANT: Log the exact user_id we're querying, to debug issues
     console.log('==========================================');
     console.log('WISHLIST REQUEST RECEIVED');
-    console.log('Fetching wishlist for user_id:', user_id, 'Type:', typeof user_id);
+    console.log('Fetching wishlist for user_id:', userIdStr, 'Type:', typeof userIdStr);
     console.log('Request params:', req.params);
     console.log('==========================================');
 
@@ -176,31 +189,14 @@ app.get('/api/wishlist/:user_id', async (req, res) => {
     
     // Debug - log exact SQL with parameters
     console.log('EXECUTING SQL:', sql.replace(/\n\s+/g, ' ').trim());
-    console.log('WITH PARAMS:', [user_id]);
+    console.log('WITH PARAMS:', [userIdStr]);
     
-    // For debugging - try with both string and numeric user_id
-    console.log('TESTING DIRECT QUERY WITH STRING USER_ID...');
-    const [testRows1] = await pool.execute('SELECT * FROM wishlist WHERE user_id = ?', [String(user_id)]);
-    console.log(`Found ${testRows1.length} wishlist items with String(user_id)`);
-    
-    console.log('TESTING DIRECT QUERY WITH NUMERIC USER_ID...');
-    const [testRows2] = await pool.execute('SELECT * FROM wishlist WHERE user_id = ?', [Number(user_id)]);
-    console.log(`Found ${testRows2.length} wishlist items with Number(user_id)`);
-    
-    // Regular query
-    const [rows] = await pool.execute(sql, [user_id]);
-    console.log(`Found ${rows.length} wishlist items for user ${user_id}`);
+    // Run the query with the string representation of user_id
+    const [rows] = await pool.execute(sql, [userIdStr]);
+    console.log(`Found ${rows.length} wishlist items for user ${userIdStr}`);
     
     // Debug ALL rows for the user_id
     console.log('ALL WISHLIST ITEMS:', JSON.stringify(rows, null, 2));
-    
-    // Query all items regardless of user_id (limited for safety)
-    const [allRows] = await pool.query('SELECT * FROM wishlist LIMIT 20');
-    console.log('SAMPLE OF ALL DB ITEMS:', allRows.map(r => ({
-      id: r.id,
-      user_id: r.user_id,
-      product_id: r.product_id
-    })));
 
     return res.json({ wishlist: rows });
   } catch (error) {
@@ -217,67 +213,20 @@ app.get('/api/debug/wishlist-user/:user_id', async (req, res) => {
     const { user_id } = req.params;
     console.log('Debug endpoint called with user_id:', user_id, 'Type:', typeof user_id);
     
+    // Convert to string for consistent handling
+    const userIdStr = String(user_id);
+    
     // Try to query with this user_id
-    const [rows] = await pool.execute('SELECT COUNT(*) AS count FROM wishlist WHERE user_id = ?', [user_id]);
+    const [rows] = await pool.execute('SELECT COUNT(*) AS count FROM wishlist WHERE user_id = ?', [userIdStr]);
     
     return res.json({ 
-      received_user_id: user_id,
+      received_user_id: userIdStr,
       timestamp: new Date().toISOString(),
       item_count: rows[0].count
     });
   } catch (error) {
     console.error('Error in debug endpoint:', error);
     return res.status(500).json({ error: 'Server error' });
-  }
-});
-
-/********************************************************************
- * Direct DB query endpoint - test with various user IDs
- ********************************************************************/
-app.get('/api/dbtest/:test_user_id', async (req, res) => {
-  try {
-    const { test_user_id } = req.params;
-    console.log('Testing DB with user_id:', test_user_id);
-    
-    const connection = await pool.getConnection();
-    
-    // Try string and number formats
-    const results = {
-      as_string: {},
-      as_number: {}
-    };
-    
-    // Test with string
-    const [stringResults] = await connection.execute(
-      'SELECT * FROM wishlist WHERE user_id = ?', 
-      [String(test_user_id)]
-    );
-    results.as_string.count = stringResults.length;
-    results.as_string.items = stringResults.map(item => ({
-      id: item.id,
-      product_id: item.product_id
-    }));
-    
-    // Test with number
-    const [numberResults] = await connection.execute(
-      'SELECT * FROM wishlist WHERE user_id = ?', 
-      [Number(test_user_id)]
-    );
-    results.as_number.count = numberResults.length;
-    results.as_number.items = numberResults.map(item => ({
-      id: item.id,
-      product_id: item.product_id
-    }));
-    
-    connection.release();
-    
-    res.json({
-      test_user_id,
-      results
-    });
-  } catch (error) {
-    console.error('Error in DB test endpoint:', error);
-    res.status(500).json({ error: 'Server error' });
   }
 });
 
@@ -289,5 +238,4 @@ app.listen(PORT, () => {
   console.log(`Wishlist API listening on port ${PORT}`);
   console.log(`Server started at: ${new Date().toISOString()}`);
   console.log(`Debug endpoint available at: http://localhost:${PORT}/api/debug/wishlist-user/YOUR_USER_ID`); 
-  console.log(`DB test endpoint available at: http://localhost:${PORT}/api/dbtest/YOUR_USER_ID`);
 });
