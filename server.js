@@ -102,6 +102,11 @@ app.post('/api/wishlist/add', async (req, res) => {
     const [result] = await pool.execute(sql, [userIdStr, productIdStr, variantIdStr || null]);
     console.log('Insert result:', result);
 
+    // Set cache-control headers
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    
     return res.json({ success: true });
   } catch (error) {
     console.error('Error adding wishlist item:', error);
@@ -151,6 +156,11 @@ app.post('/api/wishlist/remove', async (req, res) => {
       console.log('No rows affected, item may not exist');
     }
 
+    // Set cache-control headers
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    
     return res.json({ success: true });
   } catch (error) {
     console.error('Error removing wishlist item:', error);
@@ -178,25 +188,44 @@ app.get('/api/wishlist/:user_id', async (req, res) => {
     console.log('WISHLIST REQUEST RECEIVED');
     console.log('Fetching wishlist for user_id:', userIdStr, 'Type:', typeof userIdStr);
     console.log('Request params:', req.params);
+    console.log('Request headers:', req.headers);
     console.log('==========================================');
 
-    const sql = `
-      SELECT id, product_id, variant_id, created_at
-      FROM wishlist
-      WHERE user_id = ?
-      ORDER BY created_at DESC
-    `;
+    // Check if this is a direct fetch or cache busting request
+    const isDirectFetch = req.headers['x-direct-fetch'] === 'true' || req.query._t || req.query._nocache;
+    let connection;
+    let rows;
     
-    // Debug - log exact SQL with parameters
-    console.log('EXECUTING SQL:', sql.replace(/\n\s+/g, ' ').trim());
-    console.log('WITH PARAMS:', [userIdStr]);
-    
-    // Run the query with the string representation of user_id
-    const [rows] = await pool.execute(sql, [userIdStr]);
-    console.log(`Found ${rows.length} wishlist items for user ${userIdStr}`);
+    if (isDirectFetch) {
+      console.log('DIRECT FETCH DETECTED - Using fresh connection');
+      // Create a new connection to ensure no connection pooling cache
+      connection = await pool.getConnection();
+      [rows] = await connection.execute('SELECT id, product_id, variant_id, created_at FROM wishlist WHERE user_id = ?', [userIdStr]);
+      console.log(`Direct fetch found ${rows.length} items for user ${userIdStr}`);
+      connection.release();
+    } else {
+      // Standard query
+      const sql = `
+        SELECT id, product_id, variant_id, created_at
+        FROM wishlist
+        WHERE user_id = ?
+        ORDER BY created_at DESC
+      `;
+      
+      console.log('EXECUTING SQL:', sql.replace(/\n\s+/g, ' ').trim());
+      console.log('WITH PARAMS:', [userIdStr]);
+      
+      [rows] = await pool.execute(sql, [userIdStr]);
+      console.log(`Found ${rows.length} wishlist items for user ${userIdStr}`);
+    }
     
     // Debug ALL rows for the user_id
     console.log('ALL WISHLIST ITEMS:', JSON.stringify(rows, null, 2));
+    
+    // Set cache-control headers
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
 
     return res.json({ wishlist: rows });
   } catch (error) {
@@ -219,6 +248,11 @@ app.get('/api/debug/wishlist-user/:user_id', async (req, res) => {
     // Try to query with this user_id
     const [rows] = await pool.execute('SELECT COUNT(*) AS count FROM wishlist WHERE user_id = ?', [userIdStr]);
     
+    // Set cache-control headers
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    
     return res.json({ 
       received_user_id: userIdStr,
       timestamp: new Date().toISOString(),
@@ -231,11 +265,108 @@ app.get('/api/debug/wishlist-user/:user_id', async (req, res) => {
 });
 
 /********************************************************************
+ * Direct SQL diagnostic endpoint to view database contents
+ ********************************************************************/
+app.get('/api/admin/check-database', async (req, res) => {
+  try {
+    // Check if there's a secret key in the request to prevent unauthorized access
+    const authKey = req.query.key;
+    if (authKey !== 'wishlist-check-123') {
+      return res.status(403).json({ error: 'Not authorized' });
+    }
+
+    // Get all users in the database
+    const [users] = await pool.query('SELECT DISTINCT user_id FROM wishlist');
+    
+    // Get the count of items for each user
+    const userCounts = [];
+    for (const user of users) {
+      const [countResult] = await pool.execute(
+        'SELECT COUNT(*) as count FROM wishlist WHERE user_id = ?', 
+        [user.user_id]
+      );
+      userCounts.push({
+        user_id: user.user_id,
+        items_count: countResult[0].count
+      });
+    }
+    
+    // Get a sample of items from the database
+    const [sampleItems] = await pool.query('SELECT * FROM wishlist LIMIT 20');
+    
+    // Set cache-control headers
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    
+    return res.json({
+      total_users: users.length,
+      users_with_counts: userCounts,
+      sample_items: sampleItems
+    });
+    
+  } catch (error) {
+    console.error('Database check error:', error);
+    return res.status(500).json({ error: 'Database check failed' });
+  }
+});
+
+/********************************************************************
+ * Force direct wishlist endpoint to bypass any caching
+ ********************************************************************/
+app.get('/api/admin/force-wishlist/:actual_user_id', async (req, res) => {
+  try {
+    const { actual_user_id } = req.params;
+    const secretKey = req.query.key || '';
+    
+    // Simple security check - require a secret key
+    if (secretKey !== 'custom-secret-12345') {
+      return res.status(403).json({ error: 'Not authorized' });
+    }
+    
+    if (!actual_user_id) {
+      return res.status(400).json({ error: 'Missing user_id parameter' });
+    }
+
+    // Convert user_id to string to ensure consistent handling
+    const userIdStr = String(actual_user_id);
+    
+    console.log('FORCE ENDPOINT: Fetching wishlist for user_id:', userIdStr);
+
+    // Direct database query with minimal processing
+    const connection = await pool.getConnection();
+    const [rows] = await connection.execute('SELECT * FROM wishlist WHERE user_id = ?', [userIdStr]);
+    connection.release();
+    
+    console.log(`FORCE ENDPOINT: Found ${rows.length} wishlist items`);
+    
+    // Set cache-control headers
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+
+    return res.json({ 
+      wishlist: rows,
+      diagnostic: {
+        user_id_provided: userIdStr,
+        query_time: new Date().toISOString(),
+        row_count: rows.length
+      }
+    });
+  } catch (error) {
+    console.error('Error in force wishlist endpoint:', error);
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
+/********************************************************************
  * Start the server
  ********************************************************************/
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Wishlist API listening on port ${PORT}`);
   console.log(`Server started at: ${new Date().toISOString()}`);
-  console.log(`Debug endpoint available at: http://localhost:${PORT}/api/debug/wishlist-user/YOUR_USER_ID`); 
+  console.log(`Debug endpoint available at: http://localhost:${PORT}/api/debug/wishlist-user/YOUR_USER_ID`);
+  console.log(`Force direct wishlist endpoint: http://localhost:${PORT}/api/admin/force-wishlist/YOUR_USER_ID?key=custom-secret-12345`);
+  console.log(`Database check endpoint: http://localhost:${PORT}/api/admin/check-database?key=wishlist-check-123`);
 });
